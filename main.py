@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 try:
@@ -584,31 +585,44 @@ ICON = {"P": "🌐", "S": "🔒", "A": "👑", "O": "🛠️", "D": "🛠️"}
 REG = []  # {cat, full, level, perm}
 
 
-@impl("help")
-async def _help(ctx, categoria: Optional[str] = None):
-    """Mostra l'elenco dei comandi (opzionale: numero o nome categoria)"""
-    if categoria and categoria.lower().startswith("category "):
-        categoria = categoria[9:].strip()
+def _clean(name):
+    """'🛡️ Moderazione' -> 'Moderazione'"""
+    return re.sub(r"^[^\w]+", "", name).strip()
+
+
+def _help_cats():
     cats = {}
     for r in REG:
         cats.setdefault(r["cat"], []).append(r)
-    names = list(cats)
-    if not categoria:
-        e = discord.Embed(title="📖 Server Manager Pro — Aiuto", color=0x5865F2,
-                          description="Prefissi: `.` e `/`\nUsa `.help <numero o nome>` per vedere una categoria.\n"
-                                      "🌐 Pubblico · 🔒 Staff · 👑 Admin · 🛠️ Owner/Dev")
-        e.add_field(name="Categorie", value="\n".join(
-            f"`{i}` **{n}** ({len(cats[n])})" for i, n in enumerate(names, 1))[:1024])
-        return await ctx.send(embed=e)
-    key = None
-    if categoria.isdigit() and 1 <= int(categoria) <= len(names):
-        key = names[int(categoria) - 1]
-    else:
-        key = next((n for n in names if categoria.lower() in n.lower()), None)
-    if not key:
-        return await ctx.send("Categoria non trovata. Usa `.help` per l'elenco.")
+    return cats
+
+
+def _parse_cats(text, names):
+    """'moderazione, 6, ticket' -> (categorie trovate, testi non riconosciuti)"""
+    text = text.strip()
+    if text.lower().startswith("category "):
+        text = text[9:]
+    found, unknown = [], []
+    for tok in re.split(r"[,;+]", text):
+        tok = tok.strip()
+        if not tok:
+            continue
+        low = tok.lower()
+        if tok.isdigit() and 1 <= int(tok) <= len(names):
+            key = names[int(tok) - 1]
+        else:
+            key = (next((n for n in names if _clean(n).lower() == low), None)
+                   or next((n for n in names if low in n.lower()), None))
+        if key is None:
+            unknown.append(tok)
+        elif key not in found:
+            found.append(key)
+    return found, unknown
+
+
+def _cat_embed(key, rows):
     lines = [f"{ICON[r['level']]} `/{r['full']}`" + (f" · *{r['perm']}*" if r["perm"] else "")
-             for r in cats[key]]
+             for r in rows]
     e = discord.Embed(title=f"📂 {key}", color=0x5865F2)
     chunk, size = [], 0
     for ln in lines:
@@ -619,7 +633,99 @@ async def _help(ctx, categoria: Optional[str] = None):
         size += len(ln) + 1
     if chunk:
         e.add_field(name="\u200b", value="\n".join(chunk), inline=False)
-    await ctx.send(embed=e)
+    return e
+
+
+async def _send_embeds(send, embeds):
+    """Invia gli embed a gruppi, rispettando i limiti di Discord (10 embed / ~6000 caratteri)."""
+    batch, size = [], 0
+    for e in embeds:
+        n = len(e)
+        if batch and (len(batch) >= 10 or size + n > 5500):
+            await send(embeds=batch)
+            batch, size = [], 0
+        batch.append(e)
+        size += n
+    if batch:
+        await send(embeds=batch)
+
+
+class HelpView(discord.ui.View):
+    """Menu a tendina: scegli una o più categorie e il bot le mostra."""
+
+    def __init__(self, owner_id, names):
+        super().__init__(timeout=300)
+        self.owner_id, self.names = owner_id, names
+        opts = []
+        for i, n in enumerate(names):
+            m = re.match(r"^([^\w]+)", n)
+            emoji = m.group(1).strip() if m else None
+            opts.append(discord.SelectOption(label=_clean(n)[:100], value=str(i), emoji=emoji or None))
+        self.sel = discord.ui.Select(placeholder="Scegli una o più categorie", min_values=1,
+                                     max_values=len(opts), options=opts)
+        self.sel.callback = self.picked
+        self.add_item(self.sel)
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Usa /help per aprire il tuo menu.", ephemeral=True)
+            return False
+        return True
+
+    async def picked(self, interaction: discord.Interaction):
+        cats = _help_cats()
+        keys = [self.names[int(v)] for v in self.sel.values]
+        first = True
+
+        async def send(**kw):
+            nonlocal first
+            if first:
+                first = False
+                await interaction.response.send_message(ephemeral=True, **kw)
+            else:
+                await interaction.followup.send(ephemeral=True, **kw)
+
+        await _send_embeds(send, [_cat_embed(k, cats[k]) for k in keys])
+
+
+async def help_autocomplete(interaction: discord.Interaction, current: str):
+    """Suggerisce i nomi delle categorie; si possono scegliere più categorie separate da virgola."""
+    names = [_clean(n) for n in _help_cats()]
+    parts = re.split(r"[,;+]", current)
+    done = [p.strip() for p in parts[:-1] if p.strip()]
+    frag = parts[-1].strip().lower()
+    chosen = {d.lower() for d in done}
+    prefix = ", ".join(done)
+    out = []
+    for n in names:
+        if n.lower() in chosen or frag not in n.lower():
+            continue
+        value = f"{prefix}, {n}" if prefix else n
+        if len(value) <= 100:
+            out.append(app_commands.Choice(name=value, value=value))
+    return out[:25]
+
+
+@impl("help")
+async def _help(ctx, *, categoria: Optional[str] = None):
+    """Mostra l'elenco dei comandi (opzionale: una o più categorie)"""
+    cats = _help_cats()
+    names = list(cats)
+    if not categoria:
+        e = discord.Embed(title="📖 Server Manager Pro — Aiuto", color=0x5865F2,
+                          description="Prefissi: `.` e `/`\n"
+                                      "Scegli una o più categorie dal menu qui sotto, oppure scrivile: "
+                                      "`/help categoria:Moderazione, Ticket` o `.help moderazione, ticket`.\n"
+                                      "🌐 Pubblico · 🔒 Staff · 👑 Admin · 🛠️ Owner/Dev")
+        e.add_field(name="Categorie", value="\n".join(
+            f"`{i}` **{n}** ({len(cats[n])})" for i, n in enumerate(names, 1))[:1024])
+        return await ctx.send(embed=e, view=HelpView(ctx.author.id, names))
+    found, unknown = _parse_cats(categoria, names)
+    if unknown:
+        await ctx.send("Non ho trovato: " + ", ".join(f"`{u}`" for u in unknown) + ". Usa `.help` per l'elenco.")
+    if not found:
+        return
+    await _send_embeds(lambda **kw: ctx.send(**kw), [_cat_embed(k, cats[k]) for k in found])
 
 
 # ------------------------------------------------------ SISTEMA TICKET
@@ -2085,7 +2191,10 @@ def build_commands():
             if group:
                 group.command(name=name, description=desc, extras=extras)(fn)
             else:
-                bot.add_command(commands.HybridCommand(fn, name=name, description=desc, extras=extras))
+                cmd = commands.HybridCommand(fn, name=name, description=desc, extras=extras)
+                if full == "help":
+                    cmd.autocomplete("categoria")(help_autocomplete)
+                bot.add_command(cmd)
             REG.append({"cat": cat, "full": full, "level": level, "perm": p})
         if group:
             bot.add_command(group)
