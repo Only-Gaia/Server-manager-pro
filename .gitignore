@@ -1,0 +1,16 @@
+# Segreti
+.env
+
+# Dati del bot
+data.json
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Editor e sistema
+.vscode/
+.idea/
+.DS_Store
