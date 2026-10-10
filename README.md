@@ -10,7 +10,7 @@ Tutto è in un unico file, `main.py`, e ogni comando funziona sia con `/` sia co
 - **Permessi a due livelli:** controlla sia il permesso Discord richiesto sia il livello interno (pubblico, staff, admin, owner, dev).
 - **Sistema ticket completo e modificabile** direttamente da Discord con `/ticketpaneledit`.
 - **Pulsanti persistenti:** i pannelli e i ticket restano funzionanti anche dopo un riavvio del bot.
-- **Help integrato:** `/help` o `.help` elenca le categorie, `.help moderazione` mostra i comandi di una categoria.
+- **Help integrato:** `/help` mostra le categorie con un menu a tendina in cui puoi sceglierne una o più. In alternativa scrivi `/help categoria:` e compaiono i nomi da selezionare (anche più di uno, separati da virgola), oppure `.help moderazione, ticket`.
 
 ## Stato dei comandi
 
