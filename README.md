@@ -111,6 +111,18 @@ Chi ha il permesso Discord Administrator o è il proprietario del server è semp
 2. Pubblica il pannello nel canale scelto: `/ticketpanelcreate` (o `.ticketpanelcreate`).
 3. Personalizzalo con `/ticketpaneledit` (o `.ticketpaneledit`).
 
+### Più pannelli
+
+Puoi avere più pannelli ticket (per esempio uno per lo staff e uno per i partner), ciascuno con le sue categorie, i suoi pulsanti interni, la sua categoria Discord e la sua modalità Close.
+
+- `/ticketpanelcreate` crea e pubblica un nuovo pannello. Se hai un pannello non ancora pubblicato, usa quello.
+- `/ticketpaneledit` mostra un **menu con i pannelli esistenti**: scegli quale modificare, senza scrivere nessun nome. Il nome interno (quello che vedi nel menu) si cambia da *Titolo e descrizione*.
+- Dall'editor, *Pubblica in un canale* (ri)pubblica il pannello scelto.
+- `/ticket panel-delete` mostra lo stesso menu per eliminare un pannello (solo se non ha ticket aperti).
+- Un utente può avere un solo ticket aperto alla volta, su tutti i pannelli insieme.
+- `/ticket settings`, `/ticket category-set` e `/ticket cooldown` valgono per **tutti** i pannelli.
+- Se avevi già un pannello, diventa automaticamente "Pannello 1" e i suoi pulsanti continuano a funzionare.
+
 ### Cosa si può modificare
 
 - **Titolo e descrizione** del pannello.
