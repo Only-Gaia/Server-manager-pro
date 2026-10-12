@@ -5,7 +5,7 @@ Tutto è in un unico file, `main.py`, e ogni comando funziona sia con `/` sia co
 
 ## Caratteristiche
 
-- **469 comandi** divisi in 25 categorie, con le descrizioni degli slash command in italiano.
+- **471 comandi** divisi in 25 categorie, con le descrizioni degli slash command in italiano.
 - **Doppio prefisso:** `/comando` oppure `.comando` (funziona anche menzionando il bot).
 - **Permessi a due livelli:** controlla sia il permesso Discord richiesto sia il livello interno (pubblico, staff, admin, owner, dev).
 - **Sistema ticket completo e modificabile** direttamente da Discord con `/ticketpaneledit`.
@@ -14,12 +14,20 @@ Tutto è in un unico file, `main.py`, e ogni comando funziona sia con `/` sia co
 
 ## Stato dei comandi
 
-Non tutti i comandi hanno già la logica completa. Quelli senza logica sono registrati, hanno i permessi corretti e rispondono "logica non ancora implementata".
+Tutti i 471 comandi hanno una logica reale: nessuno risponde più "non ancora implementato".
+Alcuni comandi sono pensati per funzionare dentro il server, quindi non vanno usati nei messaggi privati.
 
-| Stato | Comandi |
-|---|---|
-| Implementati | moderazione (warn, timeout, kick, ban, softban, purge, lock, slowmode, nickname, casi e note), `/role` (create, delete, add, remove, info, list, members), `/member info` e `avatar`, `/channel info` e `list`, `/server info`, `/staff`, `/poll create`, `/reminder create`, parte di `/utility`, diagnostica (`/health`, `/uptime`, `/latency`, `/version`, `/status`), `/bot` (info, status, servers, sync-commands, shutdown), `/help` e tutto il sistema ticket |
-| Segnaposto | tutto il resto (giveaway, backup, automod, livelli, log, ecc.) |
+### Formati utili
+
+- **Durate e orari:** `30s`, `10m`, `2h`, `1d`, `1w`. Un numero da solo vale minuti. Dove serve un orario si può scrivere `18:30` (fuso impostato con `/schedule timezone`).
+- **Operazioni delicate** (reset, ripristino, import): vanno confermate aggiungendo `CONFERMA` come ultimo parametro.
+- **Segnaposto nei messaggi** di benvenuto, addio, DM e livelli: `{user}`, `{name}`, `{server}`, `{count}`, `{level}`.
+- **Riferimenti a messaggi:** si possono usare l'ID oppure il link del messaggio.
+
+### Cosa fanno in automatico
+
+Il bot controlla i messaggi (antispam, link, inviti, parole vietate, maiuscole, emoji, menzioni, allegati, regole automod), assegna gli autorole, conta XP e attività, scrive i log, aggiorna contatori e traguardi e gestisce i lavori pianificati (promemoria, annunci, giveaway, eventi, ruoli temporanei, backup automatici).
+Le protezioni si attivano con `/security setup` o con i singoli comandi `enable`.
 
 ## Requisiti
 
@@ -119,6 +127,15 @@ Oltre alle azioni predefinite, puoi creare pulsanti con due azioni extra:
 
 - `messaggio`: invia un testo scritto da te. Con `{user}` viene nominato chi clicca.
 - `ping`: chiama i ruoli staff.
+
+### Ping nei ticket
+
+Con `/ping` scegli i ruoli che entrano nei nuovi ticket e vengono menzionati quando un ticket si apre (e dal pulsante *ping*). Il limite è di **40 ruoli**.
+
+- `/ping ruoli` (oppure `.ping @ruolo1 @ruolo2 ...`) aggiunge fino a 5 ruoli alla volta. Senza ruoli mostra l'elenco attuale.
+- `/ping reset` (oppure `.ping reset`) azzera **tutti** i ping: nei nuovi ticket non viene menzionato nessun ruolo.
+- Finché non imposti nulla, nei ticket vengono menzionati i ruoli staff, come prima.
+- Le modifiche valgono per i ticket nuovi, quelli già aperti restano com'erano.
 
 ### Close, Reopen e Delete
 
