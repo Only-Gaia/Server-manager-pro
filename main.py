@@ -808,8 +808,49 @@ def default_td():
     }
 
 
-def tdata(guild_id):
-    td = G["gdata"](guild_id).setdefault("tickets", default_td())
+def panels_of(gid):
+    """Tutti i pannelli ticket del server: {"p1": configurazione, "p2": ...}."""
+    gd = G["gdata"](gid)
+    if "tickets" in gd:  # migrazione: il vecchio pannello unico diventa "p1"
+        old = gd.pop("tickets")
+        if "ping_roles" in old:
+            gd["ping_roles"] = old.pop("ping_roles")
+        old["pid"], old["name"] = "p1", old.get("name", "Pannello 1")
+        gd.setdefault("ticket_panels", {})["p1"] = old
+        G["save"]()
+    return gd.setdefault("ticket_panels", {})
+
+
+def new_panel(gid, name=None):
+    ps = panels_of(gid)
+    n = 1
+    while f"p{n}" in ps:
+        n += 1
+    td = default_td()
+    td["pid"], td["name"] = f"p{n}", name or f"Pannello {n}"
+    ps[td["pid"]] = td
+    G["save"]()
+    return td
+
+
+def find_ticket(guild_id, channel_id):
+    """Trova (pannello, ticket) a cui appartiene un canale; (None, None) se non è un ticket."""
+    for td in panels_of(guild_id).values():
+        tk = td["open"].get(str(channel_id))
+        if tk:
+            return td, tk
+    return None, None
+
+
+def tdata(guild_id, pid=None):
+    ps = panels_of(guild_id)
+    if not ps:
+        new_panel(guild_id)
+    if pid not in ps:
+        pid = min(ps, key=lambda k: int(k[1:]))
+    td = ps[pid]
+    td.setdefault("pid", pid)
+    td.setdefault("name", f"Pannello {pid[1:]}")
     if td.get("v") != 2:  # migrazione dalle versioni precedenti
         if isinstance(td.get("buttons"), dict):
             td["buttons"] = [{"id": k, "label": v["label"], "emoji": v["emoji"], "style": v["style"],
@@ -858,10 +899,11 @@ def staff_roles_of(guild):
 
 def ping_roles_of(guild):
     """Ruoli menzionati (e aggiunti) nei ticket: quelli impostati con /ping, altrimenti i ruoli staff."""
-    td = tdata(guild.id)
-    if "ping_roles" not in td:
+    gd = G["gdata"](guild.id)
+    panels_of(guild.id)
+    if "ping_roles" not in gd:
         return staff_roles_of(guild)
-    return [r for r in (guild.get_role(i) for i in td["ping_roles"]) if r]
+    return [r for r in (guild.get_role(i) for i in gd["ping_roles"]) if r]
 
 
 def allowed(user, tk, perm):
@@ -881,29 +923,30 @@ def move_to(items, obj, pos):
 
 
 # ----------------------------------------------------------- VISTE PERSISTENTI
-class OpenButton(discord.ui.DynamicItem[discord.ui.Button], template=r"tk:open:(?P<cat>[a-z0-9_-]+)"):
-    def __init__(self, cat, label=None, emoji=None, style=discord.ButtonStyle.primary):
+class OpenButton(discord.ui.DynamicItem[discord.ui.Button], template=r"tk:open:(?:(?P<pid>p\d+):)?(?P<cat>[a-z0-9_-]+)"):
+    def __init__(self, pid, cat, label=None, emoji=None, style=discord.ButtonStyle.primary):
         super().__init__(discord.ui.Button(label=label, emoji=emoji or None, style=style,
-                                           custom_id=f"tk:open:{cat}"))
-        self.cat = cat
+                                           custom_id=f"tk:open:{pid}:{cat}"))
+        self.pid, self.cat = pid, cat
 
     @classmethod
     async def from_custom_id(cls, interaction, item, match, /):
-        return cls(match["cat"], item.label, item.emoji, item.style)
+        return cls(match["pid"] or "p1", match["cat"], item.label, item.emoji, item.style)
 
     async def callback(self, interaction: discord.Interaction):
         guild, user = interaction.guild, interaction.user
-        td = tdata(guild.id)
+        td = tdata(guild.id, self.pid)
         cat = next((c for c in td["categories"] if c["id"] == self.cat), None)
         if not cat or not cat["enabled"]:
             return await interaction.response.send_message("Questa categoria non è disponibile.", ephemeral=True)
         if cat.get("role_id") and not any(r.id == cat["role_id"] for r in user.roles):
             return await interaction.response.send_message("Questa categoria è riservata a un ruolo specifico.", ephemeral=True)
-        for cid, tk in list(td["open"].items()):
-            if guild.get_channel(int(cid)) is None:
-                td["open"].pop(cid)
-            elif tk["owner"] == user.id:
-                return await interaction.response.send_message(f"Hai già un ticket aperto: <#{cid}>", ephemeral=True)
+        for ptd in panels_of(guild.id).values():  # un solo ticket aperto per utente, su tutti i pannelli
+            for cid, tk in list(ptd["open"].items()):
+                if guild.get_channel(int(cid)) is None:
+                    ptd["open"].pop(cid)
+                elif tk["owner"] == user.id:
+                    return await interaction.response.send_message(f"Hai già un ticket aperto: <#{cid}>", ephemeral=True)
         cdm = td.get("cooldown", 0)
         last = td.setdefault("last_open", {}).get(str(user.id), 0)
         if cdm and time.time() - last < cdm * 60 and not G["is_staff"](user):
@@ -927,10 +970,10 @@ class OpenButton(discord.ui.DynamicItem[discord.ui.Button], template=r"tk:open:(
         parent = guild.get_channel(td["category_id"]) if td["category_id"] else None
         if not isinstance(parent, discord.CategoryChannel):
             parent = None
-        td["counter"] += 1
+        n_ticket = nid(guild.id, "ticket")
         try:
             ch = await guild.create_text_channel(
-                name=f"{cat['id']}-{td['counter']:04d}"[:100], category=parent, overwrites=ow,
+                name=f"{cat['id']}-{n_ticket:04d}"[:100], category=parent, overwrites=ow,
                 topic=f"Ticket di {user} ({user.id}) · {cat['label']}")
         except discord.Forbidden:
             return await interaction.followup.send("❌ Non ho il permesso di creare canali.", ephemeral=True)
@@ -960,7 +1003,9 @@ class TicketButton(discord.ui.DynamicItem[discord.ui.Button], template=r"tk:(?:a
         return cls(match["bid"], item.label, item.emoji, item.style)
 
     async def callback(self, interaction: discord.Interaction):
-        td = tdata(interaction.guild_id)
+        td, _tk0 = find_ticket(interaction.guild_id, interaction.channel.id)
+        if td is None:
+            return await interaction.response.send_message("Questo canale non è un ticket.", ephemeral=True)
         b = next((x for x in td["buttons"] if x["id"] == self.bid), None)
         reply = lambda t, **kw: interaction.response.send_message(t, **kw)
         if not b or not b["enabled"]:
@@ -1000,7 +1045,7 @@ class TicketButton(discord.ui.DynamicItem[discord.ui.Button], template=r"tk:(?:a
 def panel_view(td):
     v = discord.ui.View(timeout=None)
     for c in [c for c in td["categories"] if c["enabled"]][:25]:
-        v.add_item(OpenButton(c["id"], c["label"], c["emoji"], bstyle(c["style"])))
+        v.add_item(OpenButton(td["pid"], c["id"], c["label"], c["emoji"], bstyle(c["style"])))
     return v
 
 
@@ -1036,7 +1081,7 @@ async def refresh_panel(guild, td) -> bool:
 # ------------------------------------------------------------- AZIONI TICKET
 # Il controllo dei permessi è fatto da chi chiama (pulsante o comando).
 def _tk(channel):
-    return tdata(channel.guild.id)["open"].get(str(channel.id))
+    return find_ticket(channel.guild.id, channel.id)[1]
 
 
 async def do_claim(channel, user, reply):
@@ -1064,7 +1109,9 @@ async def do_unclaim(channel, user, reply):
 
 
 async def _remove_channel(channel, user, reply, text):
-    td = tdata(channel.guild.id)
+    td, _tk0 = find_ticket(channel.guild.id, channel.id)
+    if td is None:
+        return
     await reply(text)
     await asyncio.sleep(5)
     tk = td["open"].pop(str(channel.id), None)
@@ -1080,8 +1127,7 @@ async def _remove_channel(channel, user, reply, text):
 
 
 async def do_close(channel, user, reply):
-    td = tdata(channel.guild.id)
-    tk = td["open"].get(str(channel.id))
+    td, tk = find_ticket(channel.guild.id, channel.id)
     if not tk:
         return await reply("Questo canale non è un ticket.", ephemeral=True)
     if td["close_mode"] == "delete":
@@ -1194,9 +1240,9 @@ class RenameModal(discord.ui.Modal, title="Rinomina il ticket"):
 
 
 class CategoryModal(discord.ui.Modal):
-    def __init__(self, cat=None):
+    def __init__(self, pid, cat=None):
         super().__init__(title="Nuova categoria" if not cat else f"Modifica {cat['label']}"[:45])
-        self.cat = cat
+        self.pid, self.cat = pid, cat
         self.nome = discord.ui.TextInput(label="Nome (es. Partnership)", max_length=40,
                                          default=cat["label"] if cat else None)
         self.emoji = discord.ui.TextInput(label="Emoji (opzionale)", required=False, max_length=64,
@@ -1210,7 +1256,7 @@ class CategoryModal(discord.ui.Modal):
             self.add_item(i)
 
     async def on_submit(self, interaction: discord.Interaction):
-        td = tdata(interaction.guild_id)
+        td = tdata(interaction.guild_id, self.pid)
         style = STYLE.get(self.colore.value.strip().lower() or "blu")
         emoji = self.emoji.value.strip()
         if not style:
@@ -1235,9 +1281,9 @@ class CategoryModal(discord.ui.Modal):
 
 
 class ButtonModal(discord.ui.Modal):
-    def __init__(self, btn=None):
+    def __init__(self, pid, btn=None):
         super().__init__(title="Nuovo pulsante" if not btn else f"Modifica {btn['label']}"[:45])
-        self.btn = btn
+        self.pid, self.btn = pid, btn
         self.label = discord.ui.TextInput(label="Nome del pulsante", max_length=80,
                                           default=btn["label"] if btn else None)
         self.emoji = discord.ui.TextInput(label="Emoji (opzionale)", required=False, max_length=64,
@@ -1254,7 +1300,7 @@ class ButtonModal(discord.ui.Modal):
             self.add_item(i)
 
     async def on_submit(self, interaction: discord.Interaction):
-        td = tdata(interaction.guild_id)
+        td = tdata(interaction.guild_id, self.pid)
         style = STYLE.get(self.colore.value.strip().lower())
         action = ACTIONS.get(self.azione.value.strip().lower())
         emoji = self.emoji.value.strip()
@@ -1287,9 +1333,9 @@ class ButtonModal(discord.ui.Modal):
 class SettingsModal(discord.ui.Modal):
     """Posizione, attivazione e (permessi | ruolo richiesto) di una categoria o di un pulsante."""
 
-    def __init__(self, kind, obj, items):
+    def __init__(self, pid, kind, obj, items):
         super().__init__(title=f"Impostazioni {obj['label']}"[:45])
-        self.kind, self.obj, self.items = kind, obj, items
+        self.pid, self.kind, self.obj, self.items = pid, kind, obj, items
         self.pos = discord.ui.TextInput(label="Posizione (numero, 1 = primo)", max_length=3,
                                         default=str(items.index(obj) + 1))
         self.on = discord.ui.TextInput(label="Attivo? (si / no)", max_length=3,
@@ -1319,23 +1365,26 @@ class SettingsModal(discord.ui.Modal):
         self.obj["enabled"] = yes(self.on.value)
         move_to(self.items, self.obj, int(self.pos.value))
         G["save"]()
-        td = tdata(interaction.guild_id)
+        td = tdata(interaction.guild_id, self.pid)
         if self.kind == "cat":
             await refresh_panel(interaction.guild, td)
         await interaction.response.send_message("✅ Impostazioni salvate.", ephemeral=True)
 
 
-class PanelTextModal(discord.ui.Modal, title="Titolo e descrizione"):
+class PanelTextModal(discord.ui.Modal, title="Nome, titolo e descrizione"):
     def __init__(self, td):
         super().__init__()
+        self.pid = td["pid"]
+        self.nome = discord.ui.TextInput(label="Nome interno (solo per l'elenco)", max_length=40, default=td.get("name"))
         self.titolo = discord.ui.TextInput(label="Titolo del pannello", max_length=100, default=td["panel"]["title"])
         self.desc = discord.ui.TextInput(label="Descrizione del pannello", style=discord.TextStyle.paragraph,
                                          max_length=1500, default=td["panel"]["description"])
-        self.add_item(self.titolo)
-        self.add_item(self.desc)
+        for i in (self.nome, self.titolo, self.desc):
+            self.add_item(i)
 
     async def on_submit(self, interaction):
-        td = tdata(interaction.guild_id)
+        td = tdata(interaction.guild_id, self.pid)
+        td["name"] = self.nome.value.strip() or td["name"]
         td["panel"]["title"], td["panel"]["description"] = self.titolo.value, self.desc.value
         G["save"]()
         await refresh_panel(interaction.guild, td)
@@ -1344,7 +1393,7 @@ class PanelTextModal(discord.ui.Modal, title="Titolo e descrizione"):
 
 # ------------------------------------------------------------------ EDITOR
 def summary_embed(td, guild):
-    e = discord.Embed(title="⚙️ Editor pannello ticket", color=0x5865F2)
+    e = discord.Embed(title=f"⚙️ Editor · {td.get('name', 'pannello')}"[:256], color=0x5865F2)
     e.add_field(name=f"📌 {td['panel']['title']}"[:256], value=td["panel"]["description"][:1024], inline=False)
     e.add_field(name="Pulsanti esterni (categorie)", inline=False, value="\n".join(
         f"{i}. {c['emoji']} **{c['label']}** · {STYLE_IT[c['style']]}"
@@ -1355,6 +1404,8 @@ def summary_embed(td, guild):
         f"{'' if b['enabled'] else ' · disattivato'}"
         for i, b in enumerate(td["buttons"], 1))[:1024] or "—")
     cat = guild.get_channel(td["category_id"]) if td["category_id"] else None
+    pub = guild.get_channel(td["panel"]["channel_id"]) if td["panel"].get("channel_id") else None
+    e.add_field(name="Pubblicato in", value=pub.mention if pub else "non pubblicato")
     e.add_field(name="Categoria Discord", value=cat.name if cat else "Nessuna")
     e.add_field(name="Close", value="elimina il canale" if td["close_mode"] == "delete" else "blocca il canale (Reopen attivo)")
     e.set_footer(text="Permessi: " + PERM_HELP)
@@ -1378,7 +1429,7 @@ class PickView(OwnerView):
 
     def __init__(self, owner_id, td, kind, mode):
         super().__init__(owner_id)
-        self.kind, self.mode = kind, mode
+        self.pid, self.kind, self.mode = td["pid"], kind, mode
         items = td["categories"] if kind == "cat" else td["buttons"]
         self.sel = discord.ui.Select(placeholder="Scegli", options=[
             discord.SelectOption(label=i["label"][:100], value=i["id"], emoji=i["emoji"] or None)
@@ -1387,15 +1438,15 @@ class PickView(OwnerView):
         self.add_item(self.sel)
 
     async def picked(self, interaction: discord.Interaction):
-        td = tdata(interaction.guild_id)
+        td = tdata(interaction.guild_id, self.pid)
         items = td["categories"] if self.kind == "cat" else td["buttons"]
         obj = next((i for i in items if i["id"] == self.sel.values[0]), None)
         if not obj:
             return await interaction.response.send_message("Elemento non trovato.", ephemeral=True)
         if self.mode == "edit":
-            return await interaction.response.send_modal(CategoryModal(obj) if self.kind == "cat" else ButtonModal(obj))
+            return await interaction.response.send_modal(CategoryModal(self.pid, obj) if self.kind == "cat" else ButtonModal(self.pid, obj))
         if self.mode == "settings":
-            return await interaction.response.send_modal(SettingsModal(self.kind, obj, items))
+            return await interaction.response.send_modal(SettingsModal(self.pid, self.kind, obj, items))
         if self.kind == "cat" and len(items) <= 1:
             return await interaction.response.send_message("Deve restare almeno una categoria.", ephemeral=True)
         items.remove(obj)
@@ -1406,24 +1457,81 @@ class PickView(OwnerView):
 
 
 class DiscordCatView(OwnerView):
+    def __init__(self, owner_id, pid):
+        super().__init__(owner_id)
+        self.pid = pid
+
     @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.category],
                        placeholder="Categoria Discord dove creare i ticket", min_values=1, max_values=1)
     async def pick(self, interaction, select):
-        tdata(interaction.guild_id)["category_id"] = select.values[0].id
+        tdata(interaction.guild_id, self.pid)["category_id"] = select.values[0].id
         G["save"]()
         await interaction.response.edit_message(
             content=f"✅ I ticket verranno creati in **{select.values[0].name}**.", view=None)
 
 
+async def delete_panel_message(guild, td):
+    p = td["panel"]
+    ch = guild.get_channel(p["channel_id"]) if p.get("channel_id") else None
+    if ch and p.get("message_id"):
+        try:
+            await (await ch.fetch_message(p["message_id"])).delete()
+        except discord.HTTPException:
+            pass
+
+
+class PublishView(OwnerView):
+    def __init__(self, owner_id, pid):
+        super().__init__(owner_id)
+        self.pid = pid
+
+    @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text],
+                       placeholder="Canale dove pubblicare il pannello", min_values=1, max_values=1)
+    async def pick(self, interaction, select):
+        td = tdata(interaction.guild_id, self.pid)
+        ch = interaction.guild.get_channel(select.values[0].id)
+        try:
+            msg = await ch.send(embed=panel_embed(td), view=panel_view(td))
+        except (discord.HTTPException, AttributeError):
+            return await interaction.response.edit_message(content="❌ Non riesco a scrivere in quel canale.", view=None)
+        await delete_panel_message(interaction.guild, td)
+        td["panel"].update(channel_id=ch.id, message_id=msg.id)
+        G["save"]()
+        await interaction.response.edit_message(content=f"✅ Pannello pubblicato in {ch.mention} (il vecchio messaggio, se c'era, è stato eliminato).", view=None)
+
+
+class PanelPickView(OwnerView):
+    """Menu per scegliere quale pannello ticket usare: niente nomi da scrivere."""
+
+    def __init__(self, owner_id, guild, on_pick):
+        super().__init__(owner_id)
+        self.on_pick = on_pick
+        opts = []
+        for pid, td in sorted(panels_of(guild.id).items(), key=lambda kv: int(kv[0][1:]))[:25]:
+            ch = guild.get_channel(td["panel"]["channel_id"]) if td["panel"].get("channel_id") else None
+            opts.append(discord.SelectOption(label=(td.get("name") or pid)[:100], value=pid,
+                                             description=(f"Pubblicato in #{ch.name}" if ch else "Non pubblicato")[:100]))
+        self.sel = discord.ui.Select(placeholder="Scegli un pannello", options=opts)
+        self.sel.callback = self.picked
+        self.add_item(self.sel)
+
+    async def picked(self, interaction: discord.Interaction):
+        await self.on_pick(interaction, self.sel.values[0])
+
+
 class EditorView(OwnerView):
+    def __init__(self, owner_id, pid):
+        super().__init__(owner_id)
+        self.pid = pid
+
     async def _pick(self, interaction, kind, mode, text):
         await interaction.response.send_message(
-            text, view=PickView(self.owner_id, tdata(interaction.guild_id), kind, mode), ephemeral=True)
+            text, view=PickView(self.owner_id, tdata(interaction.guild_id, self.pid), kind, mode), ephemeral=True)
 
     # riga 0: pulsanti esterni (categorie)
     @discord.ui.button(label="Aggiungi categoria", emoji="➕", style=discord.ButtonStyle.success, row=0)
     async def cat_add(self, interaction, button):
-        await interaction.response.send_modal(CategoryModal())
+        await interaction.response.send_modal(CategoryModal(self.pid))
 
     @discord.ui.button(label="Modifica categoria", emoji="✏️", style=discord.ButtonStyle.primary, row=0)
     async def cat_edit(self, interaction, button):
@@ -1440,16 +1548,16 @@ class EditorView(OwnerView):
     # riga 1: pannello e chiusura
     @discord.ui.button(label="Titolo e descrizione", emoji="📝", style=discord.ButtonStyle.secondary, row=1)
     async def text(self, interaction, button):
-        await interaction.response.send_modal(PanelTextModal(tdata(interaction.guild_id)))
+        await interaction.response.send_modal(PanelTextModal(tdata(interaction.guild_id, self.pid)))
 
     @discord.ui.button(label="Categoria Discord", emoji="📁", style=discord.ButtonStyle.secondary, row=1)
     async def dcat(self, interaction, button):
-        await interaction.response.send_message("Scegli la categoria Discord:", view=DiscordCatView(self.owner_id),
+        await interaction.response.send_message("Scegli la categoria Discord:", view=DiscordCatView(self.owner_id, self.pid),
                                                 ephemeral=True)
 
     @discord.ui.button(label="Modalità Close", emoji="🔒", style=discord.ButtonStyle.secondary, row=1)
     async def close_mode(self, interaction, button):
-        td = tdata(interaction.guild_id)
+        td = tdata(interaction.guild_id, self.pid)
         td["close_mode"] = "lock" if td["close_mode"] == "delete" else "delete"
         G["save"]()
         await interaction.response.send_message(
@@ -1459,7 +1567,7 @@ class EditorView(OwnerView):
     # riga 2: pulsanti interni
     @discord.ui.button(label="Aggiungi pulsante", emoji="➕", style=discord.ButtonStyle.success, row=2)
     async def btn_add(self, interaction, button):
-        await interaction.response.send_modal(ButtonModal())
+        await interaction.response.send_modal(ButtonModal(self.pid))
 
     @discord.ui.button(label="Modifica pulsante", emoji="✏️", style=discord.ButtonStyle.primary, row=2)
     async def btn_edit(self, interaction, button):
@@ -1476,55 +1584,81 @@ class EditorView(OwnerView):
     # riga 3
     @discord.ui.button(label="Riepilogo", emoji="📋", style=discord.ButtonStyle.secondary, row=3)
     async def recap(self, interaction, button):
-        await interaction.response.send_message(embed=summary_embed(tdata(interaction.guild_id), interaction.guild),
+        await interaction.response.send_message(embed=summary_embed(tdata(interaction.guild_id, self.pid), interaction.guild),
                                                 ephemeral=True)
 
     @discord.ui.button(label="Aggiorna pannello", emoji="🔄", style=discord.ButtonStyle.success, row=3)
     async def refresh(self, interaction, button):
-        ok = await refresh_panel(interaction.guild, tdata(interaction.guild_id))
+        ok = await refresh_panel(interaction.guild, tdata(interaction.guild_id, self.pid))
         await interaction.response.send_message(
             "✅ Pannello aggiornato." if ok else "⚠️ Aggiornamento rifiutato da Discord.", ephemeral=True)
 
+    @discord.ui.button(label="Pubblica in un canale", emoji="📣", style=discord.ButtonStyle.primary, row=3)
+    async def publish(self, interaction, button):
+        await interaction.response.send_message("In quale canale vuoi (ri)pubblicare questo pannello?",
+                                                view=PublishView(self.owner_id, self.pid), ephemeral=True)
+
 
 # ------------------------------------------------------------------ COMANDI
-async def _panel_create(ctx, canale: Optional[discord.TextChannel] = None):
-    """Pubblica il pannello ticket"""
-    td = tdata(ctx.guild.id)
+async def _panel_create(ctx, canale: Optional[discord.TextChannel] = None, *, nome: Optional[str] = None):
+    """Crea e pubblica un pannello ticket"""
+    ps = panels_of(ctx.guild.id)
+    td = next((p for p in ps.values() if not p["panel"].get("message_id")), None)  # riusa un pannello non ancora pubblicato
+    if td is None:
+        if len(ps) >= 25:
+            raise commands.CheckFailure("Hai già 25 pannelli: eliminane uno con `/ticket panel-delete`.")
+        td = new_panel(ctx.guild.id, nome)
+    elif nome:
+        td["name"] = nome
     ch = canale or ctx.channel
     msg = await ch.send(embed=panel_embed(td), view=panel_view(td))
     td["panel"].update(channel_id=ch.id, message_id=msg.id)
     G["save"]()
-    await ctx.send(f"✅ Pannello pubblicato in {ch.mention}. Usa `/ticketpaneledit` per modificarlo.", ephemeral=True)
+    await ctx.send(f"✅ Pannello **{td['name']}** pubblicato in {ch.mention}. Con `/ticketpaneledit` potrai scegliere quale modificare.", ephemeral=True)
+
+
+async def _open_editor(interaction, pid):
+    td = tdata(interaction.guild_id, pid)
+    await interaction.response.edit_message(content=None, embed=summary_embed(td, interaction.guild),
+                                            view=EditorView(interaction.user.id, pid))
 
 
 async def _panel_edit(ctx):
-    """Modifica categorie, descrizione e pulsanti del pannello ticket"""
-    await ctx.send(embed=summary_embed(tdata(ctx.guild.id), ctx.guild), view=EditorView(ctx.author.id), ephemeral=True)
+    """Scegli un pannello ticket e modificane categorie, descrizione e pulsanti"""
+    if not panels_of(ctx.guild.id):
+        raise commands.CheckFailure("Non c'è ancora nessun pannello: creane uno con `/ticketpanelcreate`.")
+    await ctx.send("Quale pannello vuoi modificare?", view=PanelPickView(ctx.author.id, ctx.guild, _open_editor), ephemeral=True)
 
 
-async def _panel_create_g(ctx, canale: Optional[discord.TextChannel] = None):
-    """Pubblica il pannello ticket"""
-    await _panel_create(ctx, canale)
+async def _panel_create_g(ctx, canale: Optional[discord.TextChannel] = None, *, nome: Optional[str] = None):
+    """Crea e pubblica un pannello ticket"""
+    await _panel_create(ctx, canale, nome=nome)
 
 
 async def _panel_edit_g(ctx):
-    """Modifica categorie, descrizione e pulsanti del pannello ticket"""
+    """Scegli un pannello ticket e modificalo"""
     await _panel_edit(ctx)
 
 
 async def _panel_delete(ctx):
-    """Elimina il pannello pubblicato"""
-    td = tdata(ctx.guild.id)
-    p = td["panel"]
-    ch = ctx.guild.get_channel(p["channel_id"]) if p["channel_id"] else None
-    if ch and p["message_id"]:
-        try:
-            await (await ch.fetch_message(p["message_id"])).delete()
-        except discord.HTTPException:
-            pass
-    p.update(channel_id=None, message_id=None)
-    G["save"]()
-    await ctx.send("🗑️ Pannello eliminato. Puoi ripubblicarlo con `/ticketpanelcreate`.")
+    """Elimina un pannello ticket"""
+    if not panels_of(ctx.guild.id):
+        raise commands.CheckFailure("Non c'è nessun pannello da eliminare.")
+
+    async def on_pick(interaction, pid):
+        ps = panels_of(interaction.guild_id)
+        td = ps.get(pid)
+        if td is None:
+            return await interaction.response.edit_message(content="Pannello non trovato.", view=None)
+        if td["open"]:
+            return await interaction.response.edit_message(
+                content=f"⚠️ Ci sono **{len(td['open'])}** ticket aperti in **{td['name']}**: chiudili prima di eliminare il pannello.", view=None)
+        await delete_panel_message(interaction.guild, td)
+        del ps[pid]
+        G["save"]()
+        await interaction.response.edit_message(content=f"🗑️ Pannello **{td['name']}** eliminato.", view=None)
+
+    await ctx.send("Quale pannello vuoi eliminare?", view=PanelPickView(ctx.author.id, ctx.guild, on_pick), ephemeral=True)
 
 
 def _reply(ctx):
@@ -1714,9 +1848,9 @@ member-screening setup|Configura la verifica dei nuovi membri.
 member-screening test|Prova la verifica.
 member-screening disable|Disattiva la verifica gestita dal bot.
 welcome-stats|Mostra statistiche sui benvenuti.
-ticket panel-create|Crea il pannello pubblico dei ticket.
-ticket panel-edit|Modifica titolo, descrizione, categorie, pulsanti esterni e interni.
-ticket panel-delete|Elimina un pannello.
+ticket panel-create|Crea e pubblica un nuovo pannello dei ticket.
+ticket panel-edit|Scegli un pannello e modifica descrizione, categorie e pulsanti.
+ticket panel-delete|Scegli un pannello da eliminare.
 ticket create|Apre un ticket.
 ticket settings|Configura il sistema ticket.
 ticket category-set|Imposta la categoria Discord di destinazione.
@@ -2244,7 +2378,8 @@ PING_MAX = 40
 async def _ping_main(ctx, ruolo1: Optional[discord.Role] = None, ruolo2: Optional[discord.Role] = None,
                      ruolo3: Optional[discord.Role] = None, ruolo4: Optional[discord.Role] = None,
                      ruolo5: Optional[discord.Role] = None):
-    td = tdata(ctx.guild.id)
+    panels_of(ctx.guild.id)
+    td = G["gdata"](ctx.guild.id)
     new = [r for r in (ruolo1, ruolo2, ruolo3, ruolo4, ruolo5) if r is not None]
     if not new:
         if "ping_roles" not in td:
@@ -2275,7 +2410,8 @@ async def _ping_main(ctx, ruolo1: Optional[discord.Role] = None, ruolo2: Optiona
 
 @impl("ping reset")
 async def _ping_reset(ctx):
-    td = tdata(ctx.guild.id)
+    panels_of(ctx.guild.id)
+    td = G["gdata"](ctx.guild.id)
     n = len(td.get("ping_roles", []))
     td["ping_roles"] = []
     save()
@@ -4371,9 +4507,13 @@ class _Shim:
         pass
 
 
+def _all_panels(gid):
+    tdata(gid)  # se non c'è nessun pannello ne crea uno di base
+    return [tdata(gid, pid) for pid in list(panels_of(gid))]
+
+
 def _ticket_here(ctx):
-    td = tdata(ctx.guild.id)
-    tk = td["open"].get(str(ctx.channel.id))
+    td, tk = find_ticket(ctx.guild.id, ctx.channel.id)
     if not tk:
         raise fail("Questo canale non è un ticket.")
     return td, tk
@@ -4381,41 +4521,48 @@ def _ticket_here(ctx):
 
 @impl("ticket create")
 async def _ticket_create(ctx, categoria: Optional[str] = None):
-    td = tdata(ctx.guild.id)
-    cats = [c for c in td["categories"] if c["enabled"]]
+    cats = [(td, c) for td in _all_panels(ctx.guild.id) for c in td["categories"] if c["enabled"]]
     key = (categoria or "").lower()
-    cat = next((c for c in cats if c["id"] == key or c["label"].lower() == key), None) or (cats[0] if cats and not categoria else None)
-    if not cat:
-        raise fail("Categoria non trovata. Disponibili: " + ", ".join(f"`{c['label']}`" for c in cats))
-    await OpenButton(cat["id"]).callback(_Shim(ctx))
+    hit = next(((td, c) for td, c in cats if c["id"] == key or c["label"].lower() == key), None) or (cats[0] if cats and not categoria else None)
+    if not hit:
+        raise fail("Categoria non trovata. Disponibili: " + ", ".join(f"`{c['label']}`" for _, c in cats))
+    await OpenButton(hit[0]["pid"], hit[1]["id"]).callback(_Shim(ctx))
 
 
 @impl("ticket settings")
 async def _ticket_settings(ctx, chiave: Optional[str] = None, *, valore: Optional[str] = None):
-    td = tdata(ctx.guild.id)
+    ps = _all_panels(ctx.guild.id)
     if chiave is None:
-        cat = ctx.guild.get_channel(td["category_id"]) if td["category_id"] else None
         gd = gdata(ctx.guild.id)
-        return await ctx.send(embed=emb("🎫 Impostazioni ticket", (
-            f"Categoria Discord: {cat.name if cat else 'nessuna'}\nClose: {'elimina il canale' if td['close_mode'] == 'delete' else 'blocca il canale'}\n"
-            f"Cooldown: {td.get('cooldown', 0)} min\nStaff: {', '.join(f'<@&{i}>' for i in gd['staff_roles'] + gd['admin_roles']) or 'nessun ruolo'}\n"
-            f"Aperti: {len(td['open'])} · Chiusi (storico): {len(td.get('history', []))}\n\n"
-            "Chiavi: `cooldown` (minuti), `close_mode` (delete/lock). Pannello: `/ticketpaneledit`.")))
+        rows = []
+        for td in ps:
+            cat = ctx.guild.get_channel(td["category_id"]) if td["category_id"] else None
+            rows.append(f"**{td['name']}** — categoria Discord: {cat.name if cat else 'nessuna'} · Close: "
+                        f"{'elimina' if td['close_mode'] == 'delete' else 'blocca'} · cooldown {td.get('cooldown', 0)} min · aperti {len(td['open'])}")
+        return await ctx.send(embed=emb("🎫 Impostazioni ticket", "\n".join(rows) + (
+            f"\n\nStaff: {', '.join(f'<@&{i}>' for i in gd['staff_roles'] + gd['admin_roles']) or 'nessun ruolo'}\n"
+            "Chiavi (valgono per **tutti** i pannelli): `cooldown` (minuti), `close_mode` (delete/lock). "
+            "Per un pannello solo: `/ticketpaneledit`.")))
     if chiave == "cooldown":
-        td["cooldown"] = max(0, int(re.search(r"\d+", valore or "0").group() if re.search(r"\d+", valore or "") else 0))
+        m = re.search(r"\d+", valore or "")
+        for td in ps:
+            td["cooldown"] = int(m.group()) if m else 0
     elif chiave == "close_mode" and valore in ("delete", "lock"):
-        td["close_mode"] = valore
+        for td in ps:
+            td["close_mode"] = valore
     else:
         raise fail("Chiavi valide: cooldown <minuti>, close_mode <delete|lock>.")
     save()
-    await ctx.send("✅ Impostazione salvata.")
+    await ctx.send("✅ Impostazione salvata per tutti i pannelli.")
 
 
 @impl("ticket category-set")
 async def _ticket_category_set(ctx, categoria: discord.CategoryChannel):
-    tdata(ctx.guild.id)["category_id"] = categoria.id
+    for td in _all_panels(ctx.guild.id):
+        td["category_id"] = categoria.id
     save()
-    await ctx.send(f"✅ I ticket verranno creati in **{categoria.name}**.")
+    await ctx.send(f"✅ I ticket di **tutti i pannelli** verranno creati in **{categoria.name}** "
+                   "(per cambiarla su un solo pannello usa `/ticketpaneledit`).")
 
 
 @impl("ticket staff-set")
@@ -4429,9 +4576,10 @@ async def _ticket_staff_set(ctx, ruolo: discord.Role):
 
 @impl("ticket cooldown")
 async def _ticket_cooldown(ctx, minuti: int):
-    tdata(ctx.guild.id)["cooldown"] = max(0, minuti)
+    for td in _all_panels(ctx.guild.id):
+        td["cooldown"] = max(0, minuti)
     save()
-    await ctx.send(f"⏳ Cooldown tra un ticket e l'altro: **{max(0, minuti)} min**.")
+    await ctx.send(f"⏳ Cooldown tra un ticket e l'altro: **{max(0, minuti)} min** (tutti i pannelli).")
 
 
 @impl("ticket transfer")
@@ -4476,38 +4624,39 @@ async def _ticket_close_reason(ctx, *, motivo: str):
 
 @impl("ticket list")
 async def _ticket_list(ctx):
-    td = tdata(ctx.guild.id)
-    lines = [f"<#{cid}> · <@{t['owner']}> · {t['cat']}" + (f" · preso da <@{t['claimed_by']}>" if t.get("claimed_by") else "") +
-             (f" · {t['priority']}" if t.get("priority") else "") + (" · 🔒 chiuso" if t.get("closed") else "")
-             for cid, t in td["open"].items()]
+    lines = []
+    for td in _all_panels(ctx.guild.id):
+        for cid, t in td["open"].items():
+            lines.append(f"<#{cid}> · [{td['name']}] <@{t['owner']}> · {t['cat']}" + (f" · preso da <@{t['claimed_by']}>" if t.get("claimed_by") else "") +
+                         (f" · {t['priority']}" if t.get("priority") else "") + (" · 🔒 chiuso" if t.get("closed") else ""))
     await ctx.send("\n".join(lines)[:1900] or "Nessun ticket aperto.", allowed_mentions=NOMENTION)
 
 
 @impl("ticket stats")
 async def _ticket_stats(ctx):
-    td = tdata(ctx.guild.id)
-    hist = td.get("history", [])
-    per = collections.Counter(t["cat"] for t in hist + list(td["open"].values()))
+    ps = _all_panels(ctx.guild.id)
+    hist = [h for td in ps for h in td.get("history", [])]
+    opened = [t for td in ps for t in td["open"].values()]
+    fb = [f for td in ps for f in td.get("feedback", [])]
+    per = collections.Counter(t["cat"] for t in hist + opened)
     dur = [t["closed_ts"] - t["ts"] for t in hist if t.get("ts") and t.get("closed_ts")]
-    fb = td.get("feedback", [])
+    rating = f"{sum(f['voto'] for f in fb) / len(fb):.1f}/5 ({len(fb)} voti)" if fb else "nessuna valutazione ancora"
     await ctx.send(embed=emb("📊 Statistiche ticket", (
-        f"Aperti: **{len(td['open'])}** · Chiusi: **{len(hist)}**\n"
-        f"Durata media: {fdur(sum(dur) / len(dur)) if dur else '—'}\n"
-        f"Valutazione media: {sum(f['voto'] for f in fb) / len(fb):.1f}/5 ({len(fb)} voti)\n" if fb else
-        f"Aperti: **{len(td['open'])}** · Chiusi: **{len(hist)}**\nDurata media: {fdur(sum(dur) / len(dur)) if dur else '—'}\nNessuna valutazione ancora.\n") +
-        "\n**Per categoria:** " + (", ".join(f"{k} {v}" for k, v in per.most_common()) or "—")))
+        f"Pannelli: **{len(ps)}** · Aperti: **{len(opened)}** · Chiusi: **{len(hist)}**\n"
+        f"Durata media: {fdur(sum(dur) / len(dur)) if dur else '—'}\nValutazione media: {rating}\n"
+        "\n**Per categoria:** " + (", ".join(f"{k} {v}" for k, v in per.most_common()) or "—"))))
 
 
 @impl("ticket feedback")
 async def _ticket_feedback(ctx, voto: Optional[int] = None, *, commento: Optional[str] = None):
-    td = tdata(ctx.guild.id)
+    ps = _all_panels(ctx.guild.id)
     if voto is None:
-        fb = td.get("feedback", [])
+        fb = [f for td in ps for f in td.get("feedback", [])]
         return await ctx.send(f"⭐ Valutazione media: {sum(f['voto'] for f in fb) / len(fb):.1f}/5 ({len(fb)} voti). "
                               "Per votare: `/ticket feedback voto:5 commento:...`" if fb else "Nessuna valutazione ancora. Per votare: `/ticket feedback voto:5`.")
     if not 1 <= voto <= 5:
         raise fail("Il voto va da 1 a 5.")
-    td.setdefault("feedback", []).append({"user": ctx.author.id, "voto": voto, "commento": commento or "", "ts": now()})
+    ps[0].setdefault("feedback", []).append({"user": ctx.author.id, "voto": voto, "commento": commento or "", "ts": now()})
     save()
     await ctx.send(f"⭐ Grazie! Voto {voto}/5 registrato.", ephemeral=True)
 
@@ -6734,9 +6883,10 @@ async def _config_validate(ctx):
     cfg = gd.get("logcfg", {})
     if not any(isinstance(v, int) and g.get_channel(v) for v in cfg.values()):
         issues.append("Nessun canale log impostato (`/logs setup`).")
-    td = gd.get("tickets")
-    if td and td.get("category_id") and not g.get_channel(td["category_id"]):
-        issues.append("La categoria Discord dei ticket non esiste più.")
+    panels_of(g.id)
+    for td in gd.get("ticket_panels", {}).values():
+        if td.get("category_id") and not g.get_channel(td["category_id"]):
+            issues.append(f"La categoria Discord del pannello «{td.get('name')}» non esiste più.")
     await ctx.send(embed=emb("🔎 Validazione configurazione", "\n".join(f"⚠️ {i}" for i in issues) or "✅ Nessun problema trovato.", 0xFEE75C if issues else 0x57F287))
 
 
@@ -6897,12 +7047,12 @@ async def _server_prefix(ctx, nuovo: Optional[str] = None):
 async def _server_setup(ctx):
     gd, g = gdata(ctx.guild.id), ctx.guild
     await _sec_setup_quiet(ctx.guild.id)
-    td = gd.get("tickets", {})
+    panels_of(ctx.guild.id)
     steps = [("Ruoli staff", bool(gd["staff_roles"] or gd["admin_roles"]), "`/staff add @ruolo`"),
              ("Canale log", bool(sec(g.id, "logcfg")), "`/logs setup #canale`"),
              ("Benvenuto", bool(sec(g.id, "welcome").get("enabled")), "`/welcome setup #canale`"),
              ("Autorole", bool(sec(g.id, "autoroles", list)), "`/autorole set @ruolo`"),
-             ("Pannello ticket", bool(td.get("panel", {}).get("message_id")), "`/ticketpanelcreate`"),
+             ("Pannello ticket", any(p["panel"].get("message_id") for p in gd.get("ticket_panels", {}).values()), "`/ticketpanelcreate`"),
              ("Verifica membri", bool(sec(g.id, "screening").get("enabled")), "`/member-screening setup`")]
     await ctx.send(embed=emb("🧭 Configurazione iniziale", "Ho attivato le protezioni base (antispam, invite-filter, mention-limit, raid-protection, badwords).\n\n" +
                              "\n".join(f"{'✅' if ok else '⬜'} **{n}**" + ("" if ok else f" → {how}") for n, ok, how in steps)))
@@ -7213,12 +7363,14 @@ async def _dev_test_logs(ctx):
 
 @impl("dev test-ticket")
 async def _dev_test_ticket(ctx):
-    td, g = tdata(ctx.guild.id), ctx.guild
-    p = td["panel"]
-    rows = [("Categorie attive", sum(c["enabled"] for c in td["categories"])), ("Pulsanti interni attivi", sum(b["enabled"] for b in td["buttons"])),
-            ("Pannello pubblicato", bool(p["message_id"])), ("Categoria Discord", bool(td["category_id"] and g.get_channel(td["category_id"]))),
-            ("Ruoli staff", len(gdata(g.id)["staff_roles"] + gdata(g.id)["admin_roles"])), ("Ticket aperti", len(td["open"])), ("Schema", td["v"])]
-    await ctx.send(embed=emb("🧪 Sistema ticket", "\n".join(f"**{k}:** {v}" for k, v in rows)))
+    g, out = ctx.guild, []
+    for td in _all_panels(g.id):
+        p = td["panel"]
+        out.append(f"**{td['name']}** (`{td['pid']}`): categorie attive {sum(c['enabled'] for c in td['categories'])}, "
+                   f"pulsanti interni attivi {sum(b['enabled'] for b in td['buttons'])}, pubblicato {'sì' if p['message_id'] else 'no'}, "
+                   f"categoria Discord {'ok' if td['category_id'] and g.get_channel(td['category_id']) else 'no'}, aperti {len(td['open'])}, schema {td['v']}")
+    out.append(f"Ruoli staff: {len(gdata(g.id)['staff_roles'] + gdata(g.id)['admin_roles'])} · Ruoli ping: " + str(len(gdata(g.id).get('ping_roles', [])) if 'ping_roles' in gdata(g.id) else 'default (staff)'))
+    await ctx.send(embed=emb("🧪 Sistema ticket", "\n".join(out)[:4000]))
 
 
 @impl("dev test-automation")
@@ -7247,12 +7399,15 @@ async def _dev_db_check(ctx):
 @impl("dev database-migrations")
 async def _dev_db_migrations(ctx):
     rows = []
-    for gid, gd in DATA["guilds"].items():
+    for gid, gd in list(DATA["guilds"].items()):
         if "tickets" in gd:
-            v0 = gd["tickets"].get("v")
-            tdata(int(gid))
-            rows.append(f"{gid}: ticket schema {v0} → {gd['tickets']['v']}")
-    await ctx.send("\n".join(rows) or "Nessun dato da migrare.")
+            panels_of(int(gid))  # migra il vecchio pannello unico in "p1"
+            rows.append(f"{gid}: pannello unico → p1")
+        for pid, td in list(gd.get("ticket_panels", {}).items()):
+            v0 = td.get("v")
+            tdata(int(gid), pid)
+            rows.append(f"{gid}/{pid}: schema {v0} → {td['v']}")
+    await ctx.send("\n".join(rows)[:1900] or "Nessun dato da migrare.")
 
 
 @impl("dev cache-status")
