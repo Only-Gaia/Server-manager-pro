@@ -123,6 +123,10 @@ Puoi avere più pannelli ticket (per esempio uno per lo staff e uno per i partne
 - `/ticket settings`, `/ticket category-set` e `/ticket cooldown` valgono per **tutti** i pannelli.
 - Se avevi già un pannello, diventa automaticamente "Pannello 1" e i suoi pulsanti continuano a funzionare.
 
+### Pulsanti o menu a tendina
+
+Sul pannello pubblico le categorie compaiono come **menu a tendina** quando sono due o più, e come **pulsante** quando ce n'è una sola. Dall'editor, *Aspetto pannello* cambia la modalità del pannello: automatico, sempre menu oppure sempre pulsanti. Nel menu il colore delle categorie non si vede.
+
 ### Cosa si può modificare
 
 - **Titolo e descrizione** del pannello.
