@@ -1042,10 +1042,48 @@ class TicketButton(discord.ui.DynamicItem[discord.ui.Button], template=r"tk:(?:a
             allowed_mentions=discord.AllowedMentions(users=True))
 
 
+DISPLAY_IT = {"auto": "automatico (1 categoria = pulsante, 2 o più = menu a tendina)",
+              "select": "sempre menu a tendina", "buttons": "sempre pulsanti"}
+
+
+def _build_cat_select(td, cats):
+    opts = [discord.SelectOption(label=c["label"][:100], value=c["id"], emoji=c["emoji"] or None) for c in cats[:25]]
+    return discord.ui.Select(custom_id=f"tk:sel:{td['pid']}", placeholder="Scegli una categoria per aprire un ticket",
+                             min_values=1, max_values=1, options=opts)
+
+
+class PanelCategorySelect(discord.ui.DynamicItem[discord.ui.Select], template=r"tk:sel:(?P<pid>p\d+)"):
+    """Menu a tendina delle categorie sul pannello pubblico."""
+
+    def __init__(self, pid, select):
+        super().__init__(select)
+        self.pid = pid
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(match["pid"], item)
+
+    async def callback(self, interaction: discord.Interaction):
+        vals = interaction.data.get("values") or []
+        if not vals:
+            return await interaction.response.defer()
+        td = tdata(interaction.guild_id, self.pid)
+        await OpenButton(self.pid, vals[0]).callback(interaction)
+        try:  # rimette il menu "pulito", così si può scegliere di nuovo la stessa categoria
+            await interaction.message.edit(view=panel_view(td))
+        except discord.HTTPException:
+            pass
+
+
 def panel_view(td):
     v = discord.ui.View(timeout=None)
-    for c in [c for c in td["categories"] if c["enabled"]][:25]:
-        v.add_item(OpenButton(td["pid"], c["id"], c["label"], c["emoji"], bstyle(c["style"])))
+    cats = [c for c in td["categories"] if c["enabled"]][:25]
+    mode = td.get("display", "auto")
+    if cats and (mode == "select" or (mode == "auto" and len(cats) > 1)):
+        v.add_item(PanelCategorySelect(td["pid"], _build_cat_select(td, cats)))
+    else:
+        for c in cats:
+            v.add_item(OpenButton(td["pid"], c["id"], c["label"], c["emoji"], bstyle(c["style"])))
     return v
 
 
@@ -1408,6 +1446,7 @@ def summary_embed(td, guild):
     e.add_field(name="Pubblicato in", value=pub.mention if pub else "non pubblicato")
     e.add_field(name="Categoria Discord", value=cat.name if cat else "Nessuna")
     e.add_field(name="Close", value="elimina il canale" if td["close_mode"] == "delete" else "blocca il canale (Reopen attivo)")
+    e.add_field(name="Aspetto", value=DISPLAY_IT[td.get("display", "auto")], inline=False)
     e.set_footer(text="Permessi: " + PERM_HELP)
     return e
 
@@ -1564,6 +1603,17 @@ class EditorView(OwnerView):
             "🔒 Close ora **elimina il canale**." if td["close_mode"] == "delete" else
             "🔒 Close ora **blocca il canale**: lo staff può usare Reopen o Delete.", ephemeral=True)
 
+    @discord.ui.button(label="Aspetto pannello", emoji="🎛️", style=discord.ButtonStyle.secondary, row=1)
+    async def display_mode(self, interaction, button):
+        td = tdata(interaction.guild_id, self.pid)
+        order = ["auto", "select", "buttons"]
+        td["display"] = order[(order.index(td.get("display", "auto")) + 1) % 3]
+        G["save"]()
+        ok = await refresh_panel(interaction.guild, td)
+        await interaction.response.send_message(
+            f"🎛️ Aspetto del pannello: **{DISPLAY_IT[td['display']]}**." + ("" if ok else "\n⚠️ Discord ha rifiutato l'aggiornamento del pannello (emoji non valida?)."),
+            ephemeral=True)
+
     # riga 2: pulsanti interni
     @discord.ui.button(label="Aggiungi pulsante", emoji="➕", style=discord.ButtonStyle.success, row=2)
     async def btn_add(self, interaction, button):
@@ -1712,7 +1762,7 @@ async def _delete(ctx):
 
 def tickets_register(impl, gdata, save, bot, is_staff, is_admin):
     G.update(gdata=gdata, save=save, is_staff=is_staff, is_admin=is_admin)
-    bot.add_dynamic_items(OpenButton, TicketButton)
+    bot.add_dynamic_items(OpenButton, TicketButton, PanelCategorySelect)
     impl("ticketpanelcreate")(_panel_create)
     impl("ticketpaneledit")(_panel_edit)
     impl("ticket panel-create")(_panel_create_g)
