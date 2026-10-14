@@ -5,7 +5,7 @@ Tutto è in un unico file, `main.py`, e ogni comando funziona sia con `/` sia co
 
 ## Caratteristiche
 
-- **471 comandi** divisi in 25 categorie, con le descrizioni degli slash command in italiano.
+- **452 comandi** divisi in 25 categorie, con le descrizioni degli slash command in italiano.
 - **Doppio prefisso:** `/comando` oppure `.comando` (funziona anche menzionando il bot).
 - **Permessi a due livelli:** controlla sia il permesso Discord richiesto sia il livello interno (pubblico, staff, admin, owner, dev).
 - **Sistema ticket completo e modificabile** direttamente da Discord con `/ticketpaneledit`.
@@ -14,7 +14,7 @@ Tutto è in un unico file, `main.py`, e ogni comando funziona sia con `/` sia co
 
 ## Stato dei comandi
 
-Tutti i 471 comandi hanno una logica reale: nessuno risponde più "non ancora implementato".
+Tutti i 452 comandi hanno una logica reale: nessuno risponde più "non ancora implementato".
 Alcuni comandi sono pensati per funzionare dentro il server, quindi non vanno usati nei messaggi privati.
 
 ### Formati utili
