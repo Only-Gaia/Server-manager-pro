@@ -293,24 +293,27 @@ async def _purge(ctx, quantita: int):
 
 
 @impl("slowmode")
-async def _slowmode(ctx, secondi: int):
+async def _slowmode(ctx, secondi: int, canale: Optional[discord.TextChannel] = None):
     """Imposta la modalità lenta del canale"""
-    await ctx.channel.edit(slowmode_delay=max(0, min(secondi, 21600)))
-    await ctx.send(f"🐢 Slowmode: {secondi}s.")
+    c = canale or ctx.channel
+    await c.edit(slowmode_delay=max(0, min(secondi, 21600)))
+    await ctx.send(f"🐢 Slowmode di {c.mention}: {max(0, min(secondi, 21600))}s.")
 
 
 @impl("lock")
-async def _lock(ctx):
+async def _lock(ctx, canale: Optional[discord.TextChannel] = None):
     """Blocca il canale"""
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-    await ctx.send("🔒 Canale bloccato.")
+    c = canale or ctx.channel
+    await c.set_permissions(ctx.guild.default_role, send_messages=False)
+    await ctx.send(f"🔒 {c.mention} bloccato.")
 
 
 @impl("unlock")
-async def _unlock(ctx):
+async def _unlock(ctx, canale: Optional[discord.TextChannel] = None):
     """Sblocca il canale"""
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=None)
-    await ctx.send("🔓 Canale sbloccato.")
+    c = canale or ctx.channel
+    await c.set_permissions(ctx.guild.default_role, send_messages=None)
+    await ctx.send(f"🔓 {c.mention} sbloccato.")
 
 
 @impl("nickname")
@@ -404,22 +407,6 @@ async def _member_avatar(ctx, member: Optional[discord.Member] = None):
 async def _util_avatar(ctx, member: Optional[discord.Member] = None):
     """Mostra l'avatar di un membro"""
     await _member_avatar(ctx, member)
-
-
-@impl("channel info")
-async def _channel_info(ctx):
-    """Informazioni sul canale corrente"""
-    c = ctx.channel
-    e = discord.Embed(title=f"#{getattr(c, 'name', 'DM')}")
-    e.add_field(name="ID", value=c.id)
-    e.add_field(name="Creato", value=discord.utils.format_dt(c.created_at, "R"))
-    await ctx.send(embed=e)
-
-
-@impl("channel list")
-async def _channel_list(ctx):
-    """Elenco dei canali del server"""
-    await ctx.send(", ".join(c.mention for c in ctx.guild.channels if not isinstance(c, discord.CategoryChannel))[:1900])
 
 
 @impl("server info")
@@ -1250,7 +1237,30 @@ async def _find_member(guild, text):
 
 
 # ------------------------------------------------------------------ MODALI
-class MemberModal(discord.ui.Modal):
+class SafeModal(discord.ui.Modal):
+    """Modulo che, se qualcosa va storto, risponde con un messaggio chiaro e registra l'errore."""
+
+    async def on_error(self, interaction, error):
+        traceback.print_exception(type(error), error, error.__traceback__)
+        try:
+            errs = DATA.setdefault("errors", [])
+            errs.append({"id": (errs[-1]["id"] + 1) if errs else 1, "ts": int(time.time()), "cmd": "modulo " + type(self).__name__,
+                         "user": interaction.user.id, "guild": interaction.guild_id or 0, "type": type(error).__name__,
+                         "tb": "".join(traceback.format_exception(type(error), error, error.__traceback__))[-1500:], "resolved": False})
+            del errs[:-100]
+        except Exception:
+            pass
+        msg = f"⚠️ Qualcosa è andato storto ({type(error).__name__}). Riprova; se succede ancora avvisa lo staff."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+
+class MemberModal(SafeModal):
     def __init__(self, add):
         super().__init__(title="Aggiungi membro" if add else "Rimuovi membro")
         self.add = add
@@ -1269,7 +1279,7 @@ class MemberModal(discord.ui.Modal):
         await fn(interaction.channel, member, reply)
 
 
-class RenameModal(discord.ui.Modal, title="Rinomina il ticket"):
+class RenameModal(SafeModal, title="Rinomina il ticket"):
     nome = discord.ui.TextInput(label="Nuovo nome del canale", max_length=90)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -1277,7 +1287,7 @@ class RenameModal(discord.ui.Modal, title="Rinomina il ticket"):
                         lambda t, **kw: interaction.response.send_message(t, **kw))
 
 
-class CategoryModal(discord.ui.Modal):
+class CategoryModal(SafeModal):
     def __init__(self, pid, cat=None):
         super().__init__(title="Nuova categoria" if not cat else f"Modifica {cat['label']}"[:45])
         self.pid, self.cat = pid, cat
@@ -1318,7 +1328,7 @@ class CategoryModal(discord.ui.Modal):
             ephemeral=True)
 
 
-class ButtonModal(discord.ui.Modal):
+class ButtonModal(SafeModal):
     def __init__(self, pid, btn=None):
         super().__init__(title="Nuovo pulsante" if not btn else f"Modifica {btn['label']}"[:45])
         self.pid, self.btn = pid, btn
@@ -1368,7 +1378,7 @@ class ButtonModal(discord.ui.Modal):
             "Posizione, attivazione e permessi si cambiano con *Impostazioni pulsante*.", ephemeral=True)
 
 
-class SettingsModal(discord.ui.Modal):
+class SettingsModal(SafeModal):
     """Posizione, attivazione e (permessi | ruolo richiesto) di una categoria o di un pulsante."""
 
     def __init__(self, pid, kind, obj, items):
@@ -1409,7 +1419,7 @@ class SettingsModal(discord.ui.Modal):
         await interaction.response.send_message("✅ Impostazioni salvate.", ephemeral=True)
 
 
-class PanelTextModal(discord.ui.Modal, title="Nome, titolo e descrizione"):
+class PanelTextModal(SafeModal, title="Nome, titolo e descrizione"):
     def __init__(self, td):
         super().__init__()
         self.pid = td["pid"]
@@ -1832,23 +1842,6 @@ member permissions|Mostra i suoi permessi effettivi.
 member rename|Cambia il soprannome.
 member notes|Mostra le note interne.
 member activity|Mostra l'attività registrata dal bot.
-channel create|Crea un canale.
-channel delete|Elimina un canale.
-channel edit|Modifica le impostazioni.
-channel info|Mostra le informazioni.
-channel clone|Duplica un canale.
-channel rename|Cambia il nome.
-channel topic|Modifica la descrizione.
-channel slowmode|Imposta il rallentamento.
-channel lock|Blocca la scrittura.
-channel unlock|Sblocca la scrittura.
-channel hide|Nasconde il canale a determinati membri.
-channel unhide|Ripristina la visibilità.
-channel permissions|Visualizza o modifica i permessi.
-channel sync-permissions|Sincronizza i permessi con la categoria.
-channel clear-permissions|Rimuove le autorizzazioni personalizzate.
-channel move|Sposta il canale.
-channel list|Elenca i canali.
 category create|Crea una categoria.
 category delete|Elimina una categoria.
 category rename|Rinomina una categoria.
@@ -1926,8 +1919,6 @@ application panel-create|Crea il pannello candidature.
 application panel-edit|Modifica il pannello.
 application submit|Invia una candidatura.
 application review|Esamina una candidatura.
-application approve|Approva una candidatura.
-application reject|Rifiuta una candidatura.
 application questions|Modifica le domande.
 application set-reviewers|Imposta i revisori.
 application list|Elenca le candidature.
@@ -2277,7 +2268,6 @@ role|P|manage_roles|create,delete,edit,add,remove,clone,color,icon,hoist,mention
 autorole|P|manage_roles|set,remove,configure,disable,list:S:~,test:S
 member|P||info,avatar,banner,joined,roles,activity,permissions:S,rename:P:manage_nicknames,notes:S
 ## 🗂️ Canali, categorie e thread
-channel|P|manage_channels|create,delete,edit,clone,rename,topic,move,slowmode,lock,unlock,hide,unhide,permissions,sync-permissions,clear-permissions,info:P:~,list:P:~
 category|P|manage_channels|create,delete,rename,move
 thread|P|manage_threads|create:P:create_public_threads,archive,unarchive,lock,unlock,list:P:~
 ## 💬 Messaggi, embed e sondaggi
@@ -2295,7 +2285,7 @@ member-screening|P|manage_guild|setup,test,disable
 ticket|S||panel-create:A:manage_channels,panel-edit:A:manage_channels,panel-delete:A:manage_channels,settings:A:manage_channels,category-set:A:manage_channels,staff-set:A:manage_channels,cooldown:A:manage_channels,create:P,close,reopen,claim,unclaim,add-member,remove-member,rename,transfer,priority,note,close-reason,transcript,delete:A:manage_channels,list,stats,feedback:P
 -|A|manage_channels|ticketpanelcreate,ticketpaneledit
 ## 📝 Candidature e segnalazioni
-application|S||panel-create:A:manage_guild,panel-edit:A:manage_guild,questions:A:manage_guild,set-reviewers:A:manage_guild,submit:P,review,approve,reject,list,stats
+application|S||panel-create:A:manage_guild,panel-edit:A:manage_guild,questions:A:manage_guild,set-reviewers:A:manage_guild,submit:P,review,list,stats
 report|S||create:P,view,list,resolve,dismiss,add-note,settings:A
 ## 📋 Log e audit
 logs|S||setup:A:manage_guild,disable:A:manage_guild,test:A:manage_guild,recent,search,member,messages,roles,channels,moderation,tickets,voice,joins,leaves,automod,bot-errors
@@ -3740,137 +3730,6 @@ async def _role_schedule(ctx, member: discord.Member, ruolo: discord.Role, azion
 
 
 # --------------------------------------------------------------- CANALI
-CH_TYPES = {"testo": "text", "text": "text", "voce": "voice", "vocale": "voice", "voice": "voice",
-            "annunci": "text", "forum": "text"}
-
-
-@impl("channel create")
-async def _channel_create(ctx, nome: str, tipo: str = "testo", categoria: Optional[discord.CategoryChannel] = None):
-    t = CH_TYPES.get(tipo.lower())
-    if not t:
-        raise fail("Tipo: testo, voce.")
-    ch = await (ctx.guild.create_text_channel if t == "text" else ctx.guild.create_voice_channel)(nome, category=categoria)
-    await ctx.send(f"✅ Creato {ch.mention}")
-
-
-@impl("channel delete")
-async def _channel_delete(ctx, canale: discord.abc.GuildChannel):
-    name = canale.name
-    await canale.delete(reason=f"Richiesto da {ctx.author}")
-    if canale.id != ctx.channel.id:
-        await ctx.send(f"🗑️ Canale **{name}** eliminato.")
-
-
-@impl("channel edit")
-async def _channel_edit(ctx, canale: discord.abc.GuildChannel, nome: Optional[str] = None,
-                        argomento: Optional[str] = None, nsfw: Optional[bool] = None):
-    kw = {k: v for k, v in (("name", nome), ("topic", argomento), ("nsfw", nsfw)) if v is not None}
-    if not kw:
-        raise fail("Indica almeno un campo (nome, argomento, nsfw).")
-    await canale.edit(**kw)
-    await ctx.send("✅ Canale modificato.")
-
-
-@impl("channel clone")
-async def _channel_clone(ctx, canale: discord.abc.GuildChannel, nome: Optional[str] = None):
-    c = await canale.clone(name=nome)
-    await ctx.send(f"✅ Duplicato: {c.mention}")
-
-
-@impl("channel rename")
-async def _channel_rename(ctx, canale: discord.abc.GuildChannel, nome: str):
-    await canale.edit(name=nome)
-    await ctx.send("✅ Rinominato.")
-
-
-@impl("channel topic")
-async def _channel_topic(ctx, canale: discord.TextChannel, *, argomento: str):
-    await canale.edit(topic=argomento)
-    await ctx.send("✅ Descrizione aggiornata.")
-
-
-@impl("channel slowmode")
-async def _channel_slowmode(ctx, canale: discord.TextChannel, secondi: int):
-    await canale.edit(slowmode_delay=max(0, min(secondi, 21600)))
-    await ctx.send(f"🐢 Slowmode di {canale.mention}: {secondi}s.")
-
-
-@impl("channel lock")
-async def _channel_lock(ctx, canale: Optional[discord.TextChannel] = None):
-    c = canale or ctx.channel
-    await c.set_permissions(ctx.guild.default_role, send_messages=False)
-    await ctx.send(f"🔒 {c.mention} bloccato.")
-
-
-@impl("channel unlock")
-async def _channel_unlock(ctx, canale: Optional[discord.TextChannel] = None):
-    c = canale or ctx.channel
-    await c.set_permissions(ctx.guild.default_role, send_messages=None)
-    await ctx.send(f"🔓 {c.mention} sbloccato.")
-
-
-@impl("channel hide")
-async def _channel_hide(ctx, canale: discord.abc.GuildChannel, ruolo: Optional[discord.Role] = None):
-    await canale.set_permissions(ruolo or ctx.guild.default_role, view_channel=False)
-    await ctx.send("🙈 Canale nascosto.")
-
-
-@impl("channel unhide")
-async def _channel_unhide(ctx, canale: discord.abc.GuildChannel, ruolo: Optional[discord.Role] = None):
-    await canale.set_permissions(ruolo or ctx.guild.default_role, view_channel=None)
-    await ctx.send("👁️ Visibilità ripristinata.")
-
-
-@impl("channel permissions")
-async def _channel_permissions(ctx, canale: discord.abc.GuildChannel, bersaglio: Optional[str] = None,
-                               permesso: Optional[str] = None, valore: Optional[str] = None):
-    if not bersaglio:
-        lines = []
-        for t, ow in canale.overwrites.items():
-            allow, deny = ow.pair()
-            lines.append(f"**{t}** ✅ {', '.join(n for n, v in allow if v) or '—'} · ❌ {', '.join(n for n, v in deny if v) or '—'}")
-        return await ctx.send("\n".join(lines)[:1900] or "Nessun permesso personalizzato.", allowed_mentions=NOMENTION)
-    if not permesso or valore is None:
-        raise fail("Uso: bersaglio (menzione/ID o `everyone`), permesso (es. send_messages), valore (si/no/reset).")
-    ids = ids_in(bersaglio)
-    target = ctx.guild.default_role if bersaglio.lower() in ("everyone", "@everyone") else \
-        (ctx.guild.get_role(ids[0]) or ctx.guild.get_member(ids[0])) if ids else None
-    if target is None or not hasattr(discord.Permissions, permesso):
-        raise fail("Bersaglio o permesso non valido.")
-    v = None if valore.lower() in ("reset", "none", "-") else yes(valore)
-    await canale.set_permissions(target, **{permesso: v})
-    await ctx.send("✅ Permesso aggiornato.")
-
-
-@impl("channel sync-permissions")
-async def _channel_sync(ctx, canale: discord.abc.GuildChannel):
-    if not canale.category:
-        raise fail("Il canale non è in una categoria.")
-    await canale.edit(sync_permissions=True)
-    await ctx.send("🔄 Permessi sincronizzati con la categoria.")
-
-
-@impl("channel clear-permissions")
-async def _channel_clear(ctx, canale: discord.abc.GuildChannel):
-    for t in list(canale.overwrites):
-        await canale.set_permissions(t, overwrite=None)
-    await ctx.send("🧹 Permessi personalizzati rimossi.")
-
-
-@impl("channel move")
-async def _channel_move(ctx, canale: discord.abc.GuildChannel, categoria: Optional[discord.CategoryChannel] = None,
-                        posizione: Optional[int] = None):
-    kw = {}
-    if categoria:
-        kw["category"] = categoria
-    if posizione is not None:
-        kw["position"] = max(0, posizione - 1)
-    if not kw:
-        raise fail("Indica una categoria e/o una posizione.")
-    await canale.edit(**kw)
-    await ctx.send("↕️ Canale spostato.")
-
-
 @impl("category create")
 async def _category_create(ctx, nome: str):
     c = await ctx.guild.create_category(nome)
@@ -4730,10 +4589,12 @@ def app_embed(rec, user=None):
         e.add_field(name=q[:256], value=(a or "—")[:1000], inline=False)
     if rec.get("note"):
         e.add_field(name="Nota del revisore", value=rec["note"][:1000], inline=False)
+    if rec["status"] != "in attesa" and rec.get("by"):
+        e.add_field(name="Deciso da", value=f"<@{rec['by']}>")
     return e
 
 
-class AppModal(discord.ui.Modal):
+class AppModal(SafeModal):
     def __init__(self, questions):
         super().__init__(title="Candidatura")
         self.qs, self.inputs = questions[:5], []
@@ -4743,17 +4604,82 @@ class AppModal(discord.ui.Modal):
             self.add_item(ti)
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         gid = interaction.guild_id
         app = app_cfg(gid)
         rec = {"id": nid(gid, "application"), "user": interaction.user.id, "status": "in attesa", "ts": now(), "by": None,
                "note": "", "answers": [[q, i.value] for q, i in zip(self.qs, self.inputs)]}
         sec(gid, "applications")[str(rec["id"])] = rec
-        save()
         ch = interaction.guild.get_channel(app.get("review_channel", 0))
+        sent = None
         if ch:
+            v = discord.ui.View(timeout=None)
+            v.add_item(AppDecideButton("ok", rec["id"]))
+            v.add_item(AppDecideButton("no", rec["id"]))
             ping = " ".join(f"<@&{r}>" for r in app["reviewers"])
-            await safe_send(ch, content=ping or None, embed=app_embed(rec), allowed_mentions=discord.AllowedMentions(roles=True))
-        await interaction.response.send_message(f"✅ Candidatura **#{rec['id']}** inviata! Ti avviseremo in privato.", ephemeral=True)
+            sent = await safe_send(ch, content=ping or None, embed=app_embed(rec), view=v, allowed_mentions=discord.AllowedMentions(roles=True))
+            if sent:
+                rec["msg"] = {"channel": ch.id, "id": sent.id}
+        save()
+        extra = "" if sent else "\n⚠️ Non ho un canale di revisione utilizzabile: lo staff la trova con `/application review`."
+        await interaction.followup.send(f"✅ Candidatura **#{rec['id']}** inviata! Ti avviseremo in privato." + extra, ephemeral=True)
+
+
+DM_ACCETTATA = "La tua candidatura è stata accettata! Benvenuto nello staff!"
+DM_RIFIUTATA = "La tua candidatura non è stata accettata, ci dispiace, prova la prossima volta!"
+
+
+async def app_apply(guild, rec, status, by):
+    """Registra la decisione, avvisa il candidato in privato e aggiorna il messaggio di revisione.
+    Ritorna True se il messaggio privato è arrivato."""
+    rec.update(status=status, by=by.id)
+    save()
+    sent = False
+    try:
+        u = guild.get_member(rec["user"]) or await bot.fetch_user(rec["user"])
+        await u.send(DM_ACCETTATA if status == "approvata" else DM_RIFIUTATA)
+        sent = True
+    except (discord.HTTPException, AttributeError):
+        pass
+    log_event(guild, "moderation", f"Candidatura #{rec['id']} {status} da {by}", rec["user"])
+    m = rec.get("msg")
+    if m:
+        try:
+            msg = await guild.get_channel(m["channel"]).fetch_message(m["id"])
+            await msg.edit(embed=app_embed(rec), view=None)
+        except (discord.HTTPException, AttributeError):
+            pass
+    return sent
+
+
+class AppDecideButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ap:(?P<act>ok|no):(?P<id>\d+)"):
+    def __init__(self, act, rid):
+        ok = act == "ok"
+        super().__init__(discord.ui.Button(label="Accetta" if ok else "Rifiuta", emoji="✅" if ok else "❌",
+                                           style=discord.ButtonStyle.success if ok else discord.ButtonStyle.danger,
+                                           custom_id=f"ap:{act}:{rid}"))
+        self.act, self.rid = act, rid
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match, /):
+        return cls(match["act"], int(match["id"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        rec = sec(interaction.guild_id, "applications").get(str(self.rid))
+        if not rec:
+            return await interaction.response.send_message("Candidatura non trovata.", ephemeral=True)
+        m = interaction.user
+        if not (is_staff(m) or any(r.id in app_cfg(interaction.guild_id)["reviewers"] for r in m.roles)):
+            return await interaction.response.send_message("Solo lo staff o i revisori possono decidere.", ephemeral=True)
+        if rec["status"] != "in attesa":
+            return await interaction.response.send_message(f"Candidatura già **{rec['status']}**.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        status = "approvata" if self.act == "ok" else "rifiutata"
+        dm = await app_apply(interaction.guild, rec, status, interaction.user)
+        await interaction.followup.send(
+            f"{'✅' if self.act == 'ok' else '❌'} Candidatura #{self.rid} **{status}**." +
+            (" Il candidato è stato avvisato in privato." if dm else "\n⚠️ Non sono riuscito a scrivere in privato al candidato (messaggi privati chiusi)."),
+            ephemeral=True)
 
 
 class AppButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ap:open"):
@@ -4846,30 +4772,6 @@ def _app_get(ctx, id):
 @impl("application review")
 async def _app_review(ctx, id: int):
     await ctx.send(embed=app_embed(_app_get(ctx, id)))
-
-
-async def _app_decide(ctx, id, status, nota):
-    r = _app_get(ctx, id)
-    r.update(status=status, by=ctx.author.id, note=nota or "")
-    save()
-    u = ctx.guild.get_member(r["user"])
-    if u:
-        try:
-            await u.send(f"Aggiornamento sulla tua candidatura **#{id}** in **{ctx.guild.name}**: **{status}**." + (f"\nNota: {nota}" if nota else ""))
-        except discord.HTTPException:
-            pass
-    log_event(ctx.guild, "moderation", f"Candidatura #{id} {status} da {ctx.author}", r["user"])
-    await ctx.send(f"{'✅' if status == 'approvata' else '❌'} Candidatura #{id} **{status}**.")
-
-
-@impl("application approve")
-async def _app_approve(ctx, id: int, *, nota: Optional[str] = None):
-    await _app_decide(ctx, id, "approvata", nota)
-
-
-@impl("application reject")
-async def _app_reject(ctx, id: int, *, motivo: Optional[str] = None):
-    await _app_decide(ctx, id, "rifiutata", motivo)
 
 
 @impl("application list")
@@ -6052,7 +5954,7 @@ async def sg_post(guild, user_id, text, fallback_channel):
     return s
 
 
-class SuggestModal(discord.ui.Modal, title="Nuovo suggerimento"):
+class SuggestModal(SafeModal, title="Nuovo suggerimento"):
     testo = discord.ui.TextInput(label="Il tuo suggerimento", style=discord.TextStyle.paragraph, max_length=1500)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -7530,7 +7432,7 @@ async def _dev_diagnostics(ctx):
 # --------------------------------------------------------------- REGISTRAZIONE FINALE
 def ext_register(b):
     """Pulsanti persistenti e scheduler: chiamato da setup_hook."""
-    b.add_dynamic_items(VerifyButton, AppButton, GiveawayButton, EventButton, SuggestButton, PanelButton, PanelSelect)
+    b.add_dynamic_items(VerifyButton, AppButton, AppDecideButton, GiveawayButton, EventButton, SuggestButton, PanelButton, PanelSelect)
     b._scheduler_task = asyncio.create_task(scheduler())
 
 
