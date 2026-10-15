@@ -1921,6 +1921,7 @@ application submit|Invia una candidatura.
 application review|Esamina una candidatura.
 application questions|Modifica le domande.
 application set-reviewers|Imposta i revisori.
+application role|Imposta il ruolo dato a chi viene accettato.
 application list|Elenca le candidature.
 application stats|Mostra le statistiche.
 report create|Invia una segnalazione.
@@ -2285,7 +2286,7 @@ member-screening|P|manage_guild|setup,test,disable
 ticket|S||panel-create:A:manage_channels,panel-edit:A:manage_channels,panel-delete:A:manage_channels,settings:A:manage_channels,category-set:A:manage_channels,staff-set:A:manage_channels,cooldown:A:manage_channels,create:P,close,reopen,claim,unclaim,add-member,remove-member,rename,transfer,priority,note,close-reason,transcript,delete:A:manage_channels,list,stats,feedback:P
 -|A|manage_channels|ticketpanelcreate,ticketpaneledit
 ## 📝 Candidature e segnalazioni
-application|S||panel-create:A:manage_guild,panel-edit:A:manage_guild,questions:A:manage_guild,set-reviewers:A:manage_guild,submit:P,review,list,stats
+application|S||panel-create:A:manage_guild,panel-edit:A:manage_guild,questions:A:manage_guild,set-reviewers:A:manage_guild,role:A:manage_guild,submit:P,review,list,stats
 report|S||create:P,view,list,resolve,dismiss,add-note,settings:A
 ## 📋 Log e audit
 logs|S||setup:A:manage_guild,disable:A:manage_guild,test:A:manage_guild,recent,search,member,messages,roles,channels,moderation,tickets,voice,joins,leaves,automod,bot-errors
@@ -4591,6 +4592,8 @@ def app_embed(rec, user=None):
         e.add_field(name="Nota del revisore", value=rec["note"][:1000], inline=False)
     if rec["status"] != "in attesa" and rec.get("by"):
         e.add_field(name="Deciso da", value=f"<@{rec['by']}>")
+    if rec.get("role_given"):
+        e.add_field(name="Ruolo assegnato", value=f"<@&{rec['role_given']}>")
     return e
 
 
@@ -4630,9 +4633,21 @@ DM_RIFIUTATA = "La tua candidatura non è stata accettata, ci dispiace, prova la
 
 
 async def app_apply(guild, rec, status, by):
-    """Registra la decisione, avvisa il candidato in privato e aggiorna il messaggio di revisione.
-    Ritorna True se il messaggio privato è arrivato."""
+    """Registra la decisione, assegna il ruolo (se accettata), avvisa il candidato in privato e aggiorna il messaggio di revisione.
+    Ritorna {"dm": messaggio privato arrivato?, "role": None / "ok" / "fail"}."""
     rec.update(status=status, by=by.id)
+    role_res = None
+    rid = app_cfg(guild.id).get("accept_role")
+    if status == "approvata" and rid:
+        role, mem = guild.get_role(rid), guild.get_member(rec["user"])
+        role_res = "fail"
+        if role and mem:
+            try:
+                await mem.add_roles(role, reason=f"Candidatura #{rec['id']} accettata")
+                rec["role_given"] = role.id
+                role_res = "ok"
+            except discord.HTTPException:
+                pass
     save()
     sent = False
     try:
@@ -4649,7 +4664,7 @@ async def app_apply(guild, rec, status, by):
             await msg.edit(embed=app_embed(rec), view=None)
         except (discord.HTTPException, AttributeError):
             pass
-    return sent
+    return {"dm": sent, "role": role_res}
 
 
 class AppDecideButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ap:(?P<act>ok|no):(?P<id>\d+)"):
@@ -4675,10 +4690,16 @@ class AppDecideButton(discord.ui.DynamicItem[discord.ui.Button], template=r"ap:(
             return await interaction.response.send_message(f"Candidatura già **{rec['status']}**.", ephemeral=True)
         await interaction.response.defer(ephemeral=True)
         status = "approvata" if self.act == "ok" else "rifiutata"
-        dm = await app_apply(interaction.guild, rec, status, interaction.user)
+        res = await app_apply(interaction.guild, rec, status, interaction.user)
+        rid = app_cfg(interaction.guild_id).get("accept_role")
+        extra = ""
+        if res["role"] == "ok":
+            extra = f"\n🎖️ Ruolo <@&{rid}> assegnato."
+        elif res["role"] == "fail":
+            extra = (f"\n⚠️ Non sono riuscito a dare il ruolo <@&{rid}>: controlla che il mio ruolo sia più in alto e che il candidato sia ancora nel server.")
         await interaction.followup.send(
             f"{'✅' if self.act == 'ok' else '❌'} Candidatura #{self.rid} **{status}**." +
-            (" Il candidato è stato avvisato in privato." if dm else "\n⚠️ Non sono riuscito a scrivere in privato al candidato (messaggi privati chiusi)."),
+            (" Il candidato è stato avvisato in privato." if res["dm"] else "\n⚠️ Non sono riuscito a scrivere in privato al candidato (messaggi privati chiusi).") + extra,
             ephemeral=True)
 
 
@@ -4721,9 +4742,10 @@ async def _app_panel_edit(ctx, titolo: Optional[str] = None, revisione: Optional
     if not (titolo or revisione or descrizione):
         rv = ctx.guild.get_channel(a.get("review_channel", 0))
         pn = ctx.guild.get_channel(a.get("panel", {}).get("channel", 0))
+        ar_txt = f"<@&{a['accept_role']}>" if a.get("accept_role") else "nessuno"
         return await ctx.send(embed=emb("📝 Configurazione candidature", (
             f"**Canale delle candidature:** {rv.mention if rv else 'non impostato'}\n**Pannello:** {pn.mention if pn else 'non pubblicato'}\n"
-            f"**Revisori:** {' '.join(f'<@&{r}>' for r in a['reviewers']) or 'solo lo staff'}\n**Domande:** {len(a['questions'])}\n"
+            f"**Revisori:** {' '.join(f'<@&{r}>' for r in a['reviewers']) or 'solo lo staff'}\n**Ruolo se accettati:** {ar_txt}\n**Domande:** {len(a['questions'])}\n"
             f"**Titolo:** {a['title']}\n\nPer cambiare il canale: `/application panel-edit revisione:#canale`")))
     changes = []
     if titolo:
@@ -4758,6 +4780,23 @@ async def _app_questions(ctx, *, domande: Optional[str] = None):
     a["questions"] = qs
     save()
     await ctx.send(f"✅ {len(qs)} domande salvate.")
+
+
+@impl("application role")
+async def _app_role(ctx, ruolo: Optional[discord.Role] = None, rimuovi: bool = False):
+    a = app_cfg(ctx.guild.id)
+    if rimuovi:
+        a.pop("accept_role", None)
+        save()
+        return await ctx.send("🗑️ Nessun ruolo verrà più dato a chi viene accettato.")
+    if ruolo is None:
+        cur = a.get("accept_role")
+        return await ctx.send(f"🎖️ Ruolo dato a chi viene accettato: {f'<@&{cur}>' if cur else 'nessuno'}.\n"
+                              "Per impostarlo: `/application role ruolo:@Ruolo` (per toglierlo: `rimuovi:True`).", allowed_mentions=NOMENTION)
+    role_ok(ctx, ruolo)
+    a["accept_role"] = ruolo.id
+    save()
+    await ctx.send(f"✅ Chi viene accettato riceverà il ruolo {ruolo.mention}.", allowed_mentions=NOMENTION)
 
 
 @impl("application set-reviewers")
