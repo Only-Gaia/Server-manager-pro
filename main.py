@@ -1916,7 +1916,7 @@ ticket stats|Mostra le statistiche.
 ticket feedback|Gestisce le valutazioni.
 ticket close-reason|Registra il motivo di chiusura.
 application panel-create|Crea il pannello candidature.
-application panel-edit|Modifica il pannello.
+application panel-edit|Modifica il pannello e il canale in cui arrivano le candidature.
 application submit|Invia una candidatura.
 application review|Esamina una candidatura.
 application questions|Modifica le domande.
@@ -4621,7 +4621,7 @@ class AppModal(SafeModal):
             if sent:
                 rec["msg"] = {"channel": ch.id, "id": sent.id}
         save()
-        extra = "" if sent else "\n⚠️ Non ho un canale di revisione utilizzabile: lo staff la trova con `/application review`."
+        extra = "" if sent else "\n⚠️ Non ho un canale di revisione utilizzabile: lo staff la trova con `/application review`. Imposta il canale con `/application panel-edit revisione:#canale`."
         await interaction.followup.send(f"✅ Candidatura **#{rec['id']}** inviata! Ti avviseremo in privato." + extra, ephemeral=True)
 
 
@@ -4705,27 +4705,45 @@ async def _app_panel_post(guild, a, ch):
 @impl("application panel-create")
 async def _app_panel_create(ctx, canale: discord.TextChannel, revisione: Optional[discord.TextChannel] = None):
     a = app_cfg(ctx.guild.id)
-    a["review_channel"] = (revisione or canale).id
+    if revisione:
+        a["review_channel"] = revisione.id
+    elif not a.get("review_channel"):
+        a["review_channel"] = canale.id  # finché non scegli un canale, le candidature arrivano qui
     await _app_panel_post(ctx.guild, a, canale)
-    await ctx.send(f"✅ Pannello candidature pubblicato in {canale.mention}. Le candidature arrivano in <#{a['review_channel']}>.")
+    await ctx.send(f"✅ Pannello candidature pubblicato in {canale.mention}. Le candidature arrivano in <#{a['review_channel']}>."
+                   + ("" if revisione or a.get("review_channel") != canale.id else
+                      "\n⚠️ È lo stesso canale del pannello: per sceglierne un altro usa `/application panel-edit revisione:#canale`."))
 
 
 @impl("application panel-edit")
-async def _app_panel_edit(ctx, titolo: Optional[str] = None, *, descrizione: Optional[str] = None):
+async def _app_panel_edit(ctx, titolo: Optional[str] = None, revisione: Optional[discord.TextChannel] = None, *, descrizione: Optional[str] = None):
     a = app_cfg(ctx.guild.id)
+    if not (titolo or revisione or descrizione):
+        rv = ctx.guild.get_channel(a.get("review_channel", 0))
+        pn = ctx.guild.get_channel(a.get("panel", {}).get("channel", 0))
+        return await ctx.send(embed=emb("📝 Configurazione candidature", (
+            f"**Canale delle candidature:** {rv.mention if rv else 'non impostato'}\n**Pannello:** {pn.mention if pn else 'non pubblicato'}\n"
+            f"**Revisori:** {' '.join(f'<@&{r}>' for r in a['reviewers']) or 'solo lo staff'}\n**Domande:** {len(a['questions'])}\n"
+            f"**Titolo:** {a['title']}\n\nPer cambiare il canale: `/application panel-edit revisione:#canale`")))
+    changes = []
     if titolo:
         a["title"] = titolo
+        changes.append("titolo")
     if descrizione:
         a["description"] = descrizione
+        changes.append("descrizione")
+    if revisione:
+        a["review_channel"] = revisione.id
+        changes.append(f"canale delle candidature → {revisione.mention}")
     save()
     p = a.get("panel")
-    if p:
+    if p and (titolo or descrizione):
         try:
             m = await ctx.guild.get_channel(p["channel"]).fetch_message(p["message"])
             await m.edit(embed=emb(a["title"], a["description"]))
         except (discord.HTTPException, AttributeError):
             pass
-    await ctx.send("✏️ Pannello aggiornato.")
+    await ctx.send("✏️ Aggiornato: " + ", ".join(changes) + ".")
 
 
 @impl("application questions")
